@@ -92,18 +92,17 @@ def fetch_candles_from_api(api_url):
     return resp.json()
 
 
-@app.route("/candles")
+@app.route("/chart")
 def get_candles():
 
     # Example usage:
-    api_url = "https://c1da7f58-f307-406d-917e-bddab526c7f6-00-3vam5nt790bd4.kirk.replit.dev/candles"
+    api_url = "https://tradingview-ws.onrender.com/candles"
     candles = fetch_candles_from_api(api_url)
     c = candles['values']
-    print(c)
     html = plot_candles_html(c)
-    with open("candles_live.html", "w") as f:
-        f.write(html)
-    print("Chart generated: candles_live.html")
+    # with open("candles_live.html", "w") as f:
+    #     f.write(html)
+    # print("Chart generated: candles_live.html")
 
     return html
 
