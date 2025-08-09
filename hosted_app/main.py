@@ -18,7 +18,6 @@ from collections import deque
 from flask import Flask, jsonify
 from datetime import datetime
 import pytz
-import os
 
 max_candle_window_len = 7
 candle_window = deque(
@@ -234,8 +233,7 @@ async def main():
             threading.Thread(target=tv.run, daemon=True).start()
 
             # Start Flask server
-            port = int(os.environ.get("PORT", 5000))
-            app.run(host="0.0.0.0", port=port)
+            app.run(host='0.0.0.0', port=5000)
         except Exception as e:
             print(f"[!] Exception occurred: {e}. Reconnecting in 2 seconds...")
             time.sleep(2)

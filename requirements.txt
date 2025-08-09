@@ -1,4 +1,4 @@
 websocket-client
-pytz
 requests
-pandas
+flask
+uvicorn
