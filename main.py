@@ -20,12 +20,12 @@ from datetime import datetime
 import pytz
 import os
 
-max_candle_window_len = 7
+max_candle_window_len = 12
 candle_window = deque(
     maxlen=max_candle_window_len)  # Store last 5/7/10 etc candles
 current_candle = None
 current_interval = None
-timeframe_minute = 1
+timeframe_minute = 5
 
 app = Flask(__name__)
 
@@ -260,7 +260,7 @@ async def main():
 def plot_candles_html(candles, title="Beautiful Interactive Candlestick Chart"):
     # Sort candles by timestamp ascending
     candles_sorted = sorted(candles, key=lambda x: x['timestamp'])
-    times = [datetime.fromtimestamp(c['timestamp']).strftime('%Y-%m-%d %H:%M:%S') for c in candles_sorted]
+    times = [c['timestamp_ist'] for c in candles_sorted]
     opens = [c['open'] for c in candles_sorted]
     highs = [c['high'] for c in candles_sorted]
     lows = [c['low'] for c in candles_sorted]
