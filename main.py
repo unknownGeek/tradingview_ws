@@ -29,6 +29,10 @@ timeframe_minute = 1
 
 app = Flask(__name__)
 
+# tradingview_symbol = "OANDA:XAUUSD"
+
+tradingview_symbol = "BINANCE:BTCUSDT"
+
 # ----------------- Utility Functions -----------------
 
 
@@ -70,7 +74,7 @@ def print_candles():
 
 class TradingViewWS:
 
-    def __init__(self, symbol="OANDA:XAUUSD"):
+    def __init__(self, symbol=tradingview_symbol):
         self.symbol = symbol
         self.session = generate_session("cs")
         self.quote_session = generate_session("qs")
@@ -192,6 +196,11 @@ class TradingViewWS:
 
 
 # HTTP endpoint to return current candles
+@app.route('/ping', methods=['GET'])
+def ping():
+    return {"status": "OK"}
+
+# HTTP endpoint to return current candles
 @app.route('/candles', methods=['GET'])
 def get_candle_window():
     # print("[+] Received request for candles")
@@ -223,7 +232,13 @@ def get_candle_window():
     # print(f"Current candles(reversed): {candles}")
     jsonifyCandles = jsonify(candles)
     # print(f"Returning last {max_candle_window_len} candles: {jsonifyCandles}")
-    return {'values': candles}
+    return {
+        'meta': {
+            'symbol': tradingview_symbol,
+            'timeframe': f"{timeframe_minute} min"
+        },
+        'values': candles
+    }
 
 
 async def main():
