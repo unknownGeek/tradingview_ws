@@ -1,4 +1,10 @@
 websocket-client
+pytz
 requests
+pandas
+matplotlib
+plotly
 flask
+dash
+fastapi
 uvicorn
