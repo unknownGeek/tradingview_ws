@@ -16,7 +16,7 @@ import time as time_module
 import plotly.graph_objs as go
 from collections import deque
 from flask import Flask, render_template_string
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import pytz
 import os
 
@@ -403,7 +403,6 @@ async def main():
 
 def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {timeframe_minute} min"):
     candles_sorted = sorted(candles, key=lambda x: x['timestamp'])
-    times = [c['timestamp_ist'] for c in candles_sorted]
     opens = [c['open'] for c in candles_sorted]
     highs = [c['high'] for c in candles_sorted]
     lows = [c['low'] for c in candles_sorted]
@@ -411,14 +410,26 @@ def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {ti
 
     last_close = closes[-1] if closes else None
 
+    # Convert timestamp strings to datetime objects if needed
+    times_dt = [datetime.fromisoformat(c['timestamp_ist']) if isinstance(c['timestamp_ist'], str) else c['timestamp_ist'] for c in candles_sorted]
+
+    # Add gap of 5 minutes after last candle
+    if times_dt:
+        last_time = times_dt[-1]
+        gap_time = last_time + timedelta(minutes = timeframe_minute*4)  # Adjust gap duration as needed
+        times_dt.append(gap_time)
+
+    # Convert back to strings for Plotly (ISO format)
+    times = [dt.isoformat() for dt in times_dt]
+
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
         x=times,
-        open=opens,
-        high=highs,
-        low=lows,
-        close=closes,
+        open=opens + [None],
+        high=highs + [None],
+        low=lows + [None],
+        close=closes + [None],
         increasing_line_color="#26a69a",
         decreasing_line_color="#ef5350",
         increasing_fillcolor="#26a69a",
@@ -429,23 +440,40 @@ def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {ti
 
     # Add live price line at last close price
     if last_close is not None:
-        fig.add_hline(
+        last_x = times[-2]  # The last real candle's timestamp (before the gap)
+
+        fig.add_shape(
+            type="line",
+            x0=last_x,
+            x1=times[-1],  # the gap timestamp or right edge
+            y0=last_close,
+            y1=last_close,
+            line=dict(
+                color="#000000",
+                width=1,
+                dash="dot",
+            ),
+        )
+
+        # Add annotation at the end of the line
+        fig.add_annotation(
+            x=times[-1],  # place annotation at the gap (right edge)
             y=last_close,
-            line_color="#FF9800",  # orange
-            line_dash="dot",
-            line_width=2,
-            annotation_text=f"{last_close:.2f}",
-            annotation_position="right",
-            annotation_font_color="white",
-            annotation_bgcolor="#FF9800",
-            annotation_bordercolor="#b26a00",
-            annotation_borderwidth=1,
-            annotation_borderpad=6,
-            annotation_font_size=14,
-            annotation_align="center",
-            annotation_arrowcolor="#FF9800",
-            annotation_arrowwidth=2,
-            annotation_arrowhead=2
+            text=f"{last_close:.2f}",
+            showarrow=True,
+            arrowhead=1,
+            arrowsize=1,
+            arrowwidth=1,
+            arrowcolor="#000000",
+            ax=0,
+            ay=0,
+            bgcolor="#000000",
+            font=dict(color="white", size=14, family="Inter, Arial"),
+            bordercolor="#b26a00",
+            borderwidth=1,
+            borderpad=6,
+            align="center",
+            valign="middle",
         )
 
     fig.update_layout(
@@ -603,6 +631,36 @@ def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {ti
         </script>
     """
 
+    wrapper_css = """
+    <style>
+      body, html {
+        margin: 0; padding: 0; height: 100%;
+        display: flex;
+        justify-content: center;  /* center horizontally */
+        align-items: center;      /* center vertically */
+        background-color: #f7f9fc;
+        font-family: 'Inter', Arial, sans-serif;
+      }
+      #chart-wrapper {
+        width: 70vw;
+        max-width: 1100px;
+        background: white;
+        padding: 24px;
+        border-radius: 12px;
+        box-shadow: 0 8px 20px rgba(0,0,0,0.12);
+        box-sizing: border-box;
+      }
+      /* Ensure Plotly fills container */
+      .plotly-graph-div {
+        width: 100% !important;
+        height: 700px !important;  /* keep your chart height */
+      }
+    </style>
+    """
+
+    # Wrap Plotly chart div inside #chart-wrapper
+    html = html.replace('<body>', f'<body>{wrapper_css}<div id="chart-wrapper">')
+    html = html.replace('</body>', '</div></body>')
     html = html.replace("</body>", style_js + "</body>")
 
     return html
