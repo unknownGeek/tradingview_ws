@@ -16,7 +16,7 @@ import time as time_module
 import plotly.graph_objs as go
 from collections import deque
 from flask import Flask, render_template_string
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 import pytz
 import os
 
@@ -24,16 +24,15 @@ max_candle_window_len = 12
 candle_window = deque(maxlen=max_candle_window_len)  # Store last 5/7/10 etc candles
 current_candle = None
 current_interval = None
-timeframe_minute = 5
-
-app = Flask(__name__)
-
 DEFAULT_FLASK_PORT = 5000
 XAU_USD_SYMBOL = "OANDA:XAUUSD"
 BTC_USD_SYMBOL = "BINANCE:BTCUSDT"
 
-tradingview_symbol = XAU_USD_SYMBOL
+app = Flask(__name__)
 
+timeframe_minute = 5
+
+tradingview_symbol = XAU_USD_SYMBOL
 # tradingview_symbol = BTC_USD_SYMBOL
 
 
@@ -64,7 +63,7 @@ state = {}  # weekend & no_trade_time flags per symbol
 
 def get_now_ist():
     ts = time_module.time()
-    dt_utc = datetime.utcfromtimestamp(ts).replace(tzinfo=pytz.utc)
+    dt_utc = datetime.fromtimestamp(ts, timezone.utc)
     return dt_utc.astimezone(IST)
 
 
@@ -367,10 +366,9 @@ def get_candle_window():
     # print(f"candles = {candles}")
 
     # Convert timestamps to IST
-    ist = pytz.timezone("Asia/Kolkata")
     for c in candles:
-        dt_utc = datetime.utcfromtimestamp(c['timestamp']).replace(tzinfo=pytz.utc)
-        dt_ist = dt_utc.astimezone(ist)
+        dt_utc = datetime.fromtimestamp(c['timestamp'], timezone.utc)
+        dt_ist = dt_utc.astimezone(IST)
         c['timestamp_ist'] = dt_ist.strftime("%Y-%m-%dT%H:%M:%S")
 
     if candles != []:
