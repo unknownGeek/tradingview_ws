@@ -12,11 +12,11 @@ import websocket
 import json
 import random
 import string
-import time
+import time as time_module
 import plotly.graph_objs as go
 from collections import deque
-from flask import Flask, jsonify
-from datetime import datetime
+from flask import Flask, render_template_string
+from datetime import datetime, time
 import pytz
 import os
 
@@ -29,9 +29,83 @@ timeframe_minute = 5
 
 app = Flask(__name__)
 
-# tradingview_symbol = "OANDA:XAUUSD"
+XAU_USD_SYMBOL = "OANDA:XAUUSD"
+BTC_USD_SYMBOL = "BINANCE:BTCUSDT"
 
-tradingview_symbol = "BINANCE:BTCUSDT"
+# tradingview_symbol = XAU_USD_SYMBOL
+
+tradingview_symbol = BTC_USD_SYMBOL
+
+
+# ---------- CONFIG ----------
+IST = pytz.timezone("Asia/Kolkata")
+
+WEEKEND_TRADING_ALLOWED_SYMBOLS = { BTC_USD_SYMBOL }
+
+TIME_OFF_IST = {
+    XAU_USD_SYMBOL: {
+        "no_trade_windows": [
+            (time(22, 30), time(23, 59, 59, 999)),  # Late NY session
+            (time(0, 0), time(5, 30)),    # Early Asia until London morning
+        ]
+    },
+    BTC_USD_SYMBOL: {
+        "no_trade_windows": [
+            (time(12, 30), time(16, 30)),
+        ]
+    }
+}
+
+# ---------- STATE TRACKING ----------
+state = {}  # weekend & no_trade_time flags per symbol
+
+
+# ---------- FILTERS ----------
+
+def get_now_ist():
+    ts = time_module.time()
+    dt_utc = datetime.utcfromtimestamp(ts).replace(tzinfo=pytz.utc)
+    return dt_utc.astimezone(IST)
+
+
+def is_weekend_ist_trading_disabled(symbol):
+    if symbol in WEEKEND_TRADING_ALLOWED_SYMBOLS:
+        return False
+
+    now_ist = get_now_ist()
+    return now_ist.weekday() in (5, 6)
+
+
+def is_no_trade_time(symbol):
+    cfg = TIME_OFF_IST.get(symbol)
+    if not cfg:
+        return False
+    now_ist = get_now_ist().time()
+    return any(start <= now_ist <= end for start, end in cfg["no_trade_windows"])
+
+
+def should_trade(symbol):
+    if symbol not in state:
+        state[symbol] = {"weekend": None, "no_trade_time": None}
+
+    weekend_now = is_weekend_ist_trading_disabled(symbol)
+    if weekend_now != state[symbol]["weekend"]:
+        state[symbol]["weekend"] = weekend_now
+        if weekend_now:
+            print(f"📅 [{symbol}] Entered weekend — skipping trades.")
+        else:
+            print(f"📅 [{symbol}] Exited weekend — trading allowed.")
+
+    no_trade_now = is_no_trade_time(symbol)
+    if no_trade_now != state[symbol]["no_trade_time"]:
+        state[symbol]["no_trade_time"] = no_trade_now
+        if no_trade_now:
+            print(f"⏳ [{symbol}] Entered no-trade hours.")
+        else:
+            print(f"⏳ [{symbol}] Exited no-trade hours.")
+
+    return not (weekend_now or no_trade_now)
+
 
 # ----------------- Utility Functions -----------------
 
@@ -135,6 +209,10 @@ class TradingViewWS:
     def handle_data(self, data):
         global current_candle, current_interval
 
+
+        if not should_trade(self.symbol):
+            return
+
         if data.get("m") != "qsd":
             return
 
@@ -143,14 +221,15 @@ class TradingViewWS:
             return
 
         values = payload.get("v", {})
-        price = values.get("lp")
-        volume = values.get("volume")
+        price = values.get("lp", values.get("ask"))
+        volume = values.get("volume", 0)
+
         if price is None:
             # print(f"price is None in {data}")
             return
 
         # Use current time as fallback if timestamp not available
-        timestamp = time.time()
+        timestamp = time_module.time()
 
         interval = get_chart_timeframe_interval(timestamp)
 
@@ -200,6 +279,77 @@ class TradingViewWS:
 def ping():
     return {"status": "OK"}
 
+
+# HTTP endpoint to return current candles
+@app.route('/', methods=['GET'])
+def homepage():
+    now_ist = get_now_ist().strftime("%Y-%m-%d %H:%M:%S")
+
+    routes = []
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint != "static":
+            methods = ",".join(rule.methods - {"HEAD", "OPTIONS"})
+            routes.append({"path": str(rule), "methods": methods})
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Jarvix - Live Price Websocket Status</title>
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f9fafc; margin: 0; padding: 0;}
+            header { background: linear-gradient(135deg, #1abc9c, #16a085); color: white; padding: 20px 40px; text-align: center; box-shadow: 0 4px 10px rgba(0,0,0,0.1);}
+            header h1 { margin: 0; font-size: 2em; font-weight: 600;}
+            .container { max-width: 900px; margin: 40px auto; padding: 20px;}
+            .status-card { background: white; border-radius: 15px; padding: 30px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); text-align: center; margin-bottom: 40px; transition: transform 0.2s ease;}
+            .status-card:hover { transform: translateY(-5px);}
+            .status-card .symbol { font-size: 1.5em; margin-bottom: 10px;}
+            .status-card .status { font-size: 1.2em; color: #27ae60; font-weight: bold;}
+            .status-card .timestamp { font-size: 0.9em; color: #888;}
+            table { width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05);}
+            th, td { padding: 12px 15px; text-align: left;}
+            th { background-color: #16a085; color: white; font-weight: 600;}
+            tr { transition: background 0.2s ease;}
+            tr:nth-child(even) { background-color: #f8f8f8;}
+            tr:hover { background-color: #eafaf1;}
+            td a { text-decoration: none; color: #2980b9; font-weight: 500;}
+            td a:hover { text-decoration: underline;}
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>📊 Jarvix - Live Price Websocket Status</h1>
+        </header>
+        <div class="container">
+            <div class="status-card">
+                <div class="symbol"><b>Symbol:</b> {{ symbol }}</div>
+                <div class="status"><b>Timeframe:</b> {{ timeframe }} min</div>
+                <div class="status">✅ OK - Connected</div>
+                <div class="timestamp">Last updated (IST): {{ now }}</div>
+            </div>
+            <h2>📍 Available Endpoints</h2>
+            <table>
+                <tr><th>Path</th><th>Methods</th></tr>
+                {% for r in routes %}
+                    <tr>
+                        <td><a href="{{ r.path }}">{{ r.path }}</a></td>
+                        <td>{{ r.methods }}</td>
+                    </tr>
+                {% endfor %}
+            </table>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(
+        html,
+        symbol=tradingview_symbol,
+        timeframe=timeframe_minute,
+        now=now_ist,
+        routes=routes
+    )
+
+
 # HTTP endpoint to return current candles
 @app.route('/candles', methods=['GET'])
 def get_candle_window():
@@ -219,19 +369,14 @@ def get_candle_window():
     # Convert timestamps to IST
     ist = pytz.timezone("Asia/Kolkata")
     for c in candles:
-        dt_utc = datetime.utcfromtimestamp(
-            c['timestamp']).replace(tzinfo=pytz.utc)
+        dt_utc = datetime.utcfromtimestamp(c['timestamp']).replace(tzinfo=pytz.utc)
         dt_ist = dt_utc.astimezone(ist)
         c['timestamp_ist'] = dt_ist.strftime("%Y-%m-%dT%H:%M:%S")
 
     if candles != []:
         candles = list(reversed(candles))
 
-    # print(f"candles = {candles}")
-
     # print(f"Current candles(reversed): {candles}")
-    jsonifyCandles = jsonify(candles)
-    # print(f"Returning last {max_candle_window_len} candles: {jsonifyCandles}")
     return {
         'meta': {
             'symbol': tradingview_symbol,
@@ -253,7 +398,7 @@ async def main():
             app.run(host="0.0.0.0", port=port)
         except Exception as e:
             print(f"[!] Exception occurred: {e}. Reconnecting in 2 seconds...")
-            time.sleep(2)
+            time_module.sleep(2)
 
 
 
