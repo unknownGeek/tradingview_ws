@@ -21,20 +21,20 @@ import pytz
 import os
 
 max_candle_window_len = 12
-candle_window = deque(
-    maxlen=max_candle_window_len)  # Store last 5/7/10 etc candles
+candle_window = deque(maxlen=max_candle_window_len)  # Store last 5/7/10 etc candles
 current_candle = None
 current_interval = None
 timeframe_minute = 5
 
 app = Flask(__name__)
+
 DEFAULT_FLASK_PORT = 5000
 XAU_USD_SYMBOL = "OANDA:XAUUSD"
 BTC_USD_SYMBOL = "BINANCE:BTCUSDT"
 
-# tradingview_symbol = XAU_USD_SYMBOL
+tradingview_symbol = XAU_USD_SYMBOL
 
-tradingview_symbol = BTC_USD_SYMBOL
+# tradingview_symbol = BTC_USD_SYMBOL
 
 
 # ---------- CONFIG ----------
