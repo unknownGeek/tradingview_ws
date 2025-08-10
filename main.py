@@ -28,7 +28,7 @@ current_interval = None
 timeframe_minute = 5
 
 app = Flask(__name__)
-
+DEFAULT_FLASK_PORT = 5000
 XAU_USD_SYMBOL = "OANDA:XAUUSD"
 BTC_USD_SYMBOL = "BINANCE:BTCUSDT"
 
@@ -394,92 +394,217 @@ async def main():
             threading.Thread(target=tv.run, daemon=True).start()
 
             # Start Flask server
-            port = int(os.environ.get("PORT", 5000))
+            port = int(os.environ.get("PORT", DEFAULT_FLASK_PORT))
             app.run(host="0.0.0.0", port=port)
         except Exception as e:
             print(f"[!] Exception occurred: {e}. Reconnecting in 2 seconds...")
             time_module.sleep(2)
 
 
-
-def plot_candles_html(candles, title="Beautiful Interactive Candlestick Chart"):
-    # Sort candles by timestamp ascending
+def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {timeframe_minute} min"):
     candles_sorted = sorted(candles, key=lambda x: x['timestamp'])
     times = [c['timestamp_ist'] for c in candles_sorted]
     opens = [c['open'] for c in candles_sorted]
     highs = [c['high'] for c in candles_sorted]
     lows = [c['low'] for c in candles_sorted]
     closes = [c['close'] for c in candles_sorted]
-    volumes = [c['volume'] for c in candles_sorted]
 
-    hover_text = [
-        f"<b>Time:</b> {t}<br>"
-        f"<b>Open:</b> {o}<br>"
-        f"<b>High:</b> {h}<br>"
-        f"<b>Low:</b> {l}<br>"
-        f"<b>Close:</b> {cl}<br>"
-        f"<b>Volume:</b> {v:,}"
-        for t, o, h, l, cl, v in zip(times, opens, highs, lows, closes, volumes)
-    ]
+    last_close = closes[-1] if closes else None
 
     fig = go.Figure()
+
     fig.add_trace(go.Candlestick(
         x=times,
         open=opens,
         high=highs,
         low=lows,
         close=closes,
-        increasing_line_color='#26a69a',
-        decreasing_line_color='#ef5350',
-        hovertext=hover_text,
-        hoverinfo='text',
-        showlegend=False,
-        name='Candles',
-        yaxis='y1'
+        increasing_line_color="#26a69a",
+        decreasing_line_color="#ef5350",
+        increasing_fillcolor="#26a69a",
+        decreasing_fillcolor="#ef5350",
+        line_width=2,
+        name="Price"
     ))
-    fig.add_trace(go.Bar(
-        x=times,
-        y=volumes,
-        marker_color="#90caf9",
-        opacity=0.4,
-        name="Volume",
-        yaxis="y2",
-        hoverinfo="skip"
-    ))
-    fig.update_layout(
-        title=title,
-        xaxis_title="Time",
-        yaxis_title="Price",
-        yaxis=dict(tickformat=".2f", showgrid=True, gridcolor="#e0e0e0", domain=[0.25, 1]),
-        yaxis2=dict(title="Volume", anchor="x", overlaying=None, side="bottom", showgrid=False, domain=[0, 0.2]),
-        xaxis=dict(type='category', showgrid=False),
-        template="plotly_white",
-        hovermode="x unified",
-        margin=dict(l=40, r=40, t=60, b=40),
-        font=dict(family="Inter, Arial", size=14),
-        dragmode="zoom",
-        autosize=True,
-        height=None,
-        width=None,
-        xaxis_showspikes=True,
-        yaxis_showspikes=True,
-        xaxis_spikemode="across",
-        yaxis_spikemode="across",
-        xaxis_spikesnap="cursor",
-        yaxis_spikesnap="cursor",
-        xaxis_spikedash="dot",
-        yaxis_spikedash="dot",
-        xaxis_spikethickness=1,
-        yaxis_spikethickness=1,
-        xaxis_spikecolor="#90caf9",
-        yaxis_spikecolor="#90caf9",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    fig.update_xaxes(rangeslider_visible=True)
-    fig.update_yaxes(fixedrange=False)
 
-    # Export to HTML string
-    html = fig.to_html(full_html=True, include_plotlyjs="cdn")
+    # Add live price line at last close price
+    if last_close is not None:
+        fig.add_hline(
+            y=last_close,
+            line_color="#FF9800",  # orange
+            line_dash="dot",
+            line_width=2,
+            annotation_text=f"{last_close:.2f}",
+            annotation_position="right",
+            annotation_font_color="white",
+            annotation_bgcolor="#FF9800",
+            annotation_bordercolor="#b26a00",
+            annotation_borderwidth=1,
+            annotation_borderpad=6,
+            annotation_font_size=14,
+            annotation_align="center",
+            annotation_arrowcolor="#FF9800",
+            annotation_arrowwidth=2,
+            annotation_arrowhead=2
+        )
+
+    fig.update_layout(
+        title=dict(text=title, x=0.5, font=dict(size=24, family="Inter, Arial")),
+        template="plotly_white",
+        xaxis=dict(
+            showgrid=False,
+            rangeslider=dict(visible=True, thickness=0.05, bgcolor="#f5f5f5"),
+            type="date",
+            tickformat="%Y-%m-%d<br>%H:%M",
+            showspikes=True,
+            spikesnap="cursor",
+            spikemode="across",
+            spikecolor="#2196f3",
+            spikedash="solid",
+            spikethickness=1
+        ),
+        yaxis=dict(
+            side="right",
+            showspikes=True,
+            spikesnap="cursor",
+            spikemode="across",
+            spikecolor="#2196f3",
+            spikedash="solid",
+            spikethickness=1,
+            tickformat=".2f",
+        ),
+        hovermode="x unified",
+        dragmode="pan",
+        autosize=True,
+        height=700,
+        margin=dict(l=40, r=80, t=60, b=40),
+        font=dict(family="Inter, Arial", size=14),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+    )
+
+    fig.update_xaxes(
+        rangeselector=dict(
+            buttons=list([
+                dict(step="all", label="All"),
+                dict(count=15, label="15m", step="minute", stepmode="backward"),
+                dict(count=1, label="1H", step="hour", stepmode="backward"),
+                dict(count=1, label="1D", step="day", stepmode="backward"),
+            ]),
+            x=0.01,
+            y=1.05
+        )
+    )
+
+    config = {
+        "displayModeBar": True,
+        "displaylogo": False,
+        "scrollZoom": True,
+        "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+        "toImageButtonOptions": {"format": "png", "scale": 2}
+    }
+
+    html = fig.to_html(full_html=True, include_plotlyjs="cdn", config=config)
+
+    # Your existing CSS + JS for OHLC info box
+    style_js = """
+    <style>
+        #ohlc-info {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            z-index: 1000;
+            background: rgba(20, 20, 20, 0.85);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border-radius: 8px;
+            padding: 10px 24px;   /* a bit more horizontal padding */
+            box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+            font-family: 'Inter', Arial, sans-serif;
+            color: #eee;
+            min-width: 360px;     /* slightly wider for spacing */
+            display: flex;
+            justify-content: space-between;  /* distribute evenly */
+            align-items: center;
+            cursor: default;
+            user-select: none;
+            transition: background-color 0.3s ease;
+        }
+        #ohlc-info:hover {
+            background: rgba(30, 30, 30, 0.95);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        }
+        #ohlc-info > div {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 70px;
+            padding: 0 10px;       /* horizontal padding between OHLC */
+        }
+        #ohlc-info > div:not(:last-child) {
+            border-right: 1px solid rgba(255,255,255,0.2); /* subtle separator */
+        }
+        #ohlc-info > div span.label {
+            font-size: 0.75em;
+            color: #aaa;
+            margin-bottom: 4px;    /* more spacing between label and value */
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        #ohlc-info > div span.value {
+            font-weight: 700;
+            font-size: 1.1em;
+        }
+        #ohlc-open { color: #42a5f5; }    /* Light blue */
+        #ohlc-high { color: #66bb6a; }    /* Green */
+        #ohlc-low { color: #ef5350; }     /* Red */
+        #ohlc-close { color: #ffa726; }   /* Orange */
+        </style>
+        <div id="ohlc-info">
+          <div><span class="label">Open</span><span class="value" id="ohlc-open">-</span></div>
+          <div><span class="label">High</span><span class="value" id="ohlc-high">-</span></div>
+          <div><span class="label">Low</span><span class="value" id="ohlc-low">-</span></div>
+          <div><span class="label">Close</span><span class="value" id="ohlc-close">-</span></div>
+        </div>
+
+        <script>
+        const plot = document.querySelector('.plotly-graph-div');
+        const openEl = document.getElementById('ohlc-open');
+        const highEl = document.getElementById('ohlc-high');
+        const lowEl = document.getElementById('ohlc-low');
+        const closeEl = document.getElementById('ohlc-close');
+
+        plot.on('plotly_hover', function(event) {
+            if(event.points.length > 0) {
+                const pt = event.points[0];
+                if(pt.data.type === 'candlestick') {
+                    const o = pt.data.open[pt.pointNumber].toFixed(2);
+                    const h = pt.data.high[pt.pointNumber].toFixed(2);
+                    const l = pt.data.low[pt.pointNumber].toFixed(2);
+                    const c = pt.data.close[pt.pointNumber].toFixed(2);
+
+                    openEl.textContent = o;
+                    highEl.textContent = h;
+                    lowEl.textContent = l;
+                    closeEl.textContent = c;
+                }
+            }
+        });
+
+        plot.on('plotly_unhover', function(event) {
+            // Optional: keep last values or reset
+            /*
+            openEl.textContent = '-';
+            highEl.textContent = '-';
+            lowEl.textContent = '-';
+            closeEl.textContent = '-';
+            */
+        });
+        </script>
+    """
+
+    html = html.replace("</body>", style_js + "</body>")
+
     return html
 
 
