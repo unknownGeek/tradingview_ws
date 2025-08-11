@@ -220,7 +220,7 @@ class TradingViewWS:
             return
 
         values = payload.get("v", {})
-        price = values.get("lp", values.get("ask"))
+        price = values.get("lp")
         volume = values.get("volume", 0)
 
         if price is None:
