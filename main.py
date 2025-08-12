@@ -39,72 +39,12 @@ tradingview_symbol = XAU_USD_SYMBOL
 # ---------- CONFIG ----------
 IST = pytz.timezone("Asia/Kolkata")
 
-WEEKEND_TRADING_ALLOWED_SYMBOLS = { BTC_USD_SYMBOL }
-
-TIME_OFF_IST = {
-    XAU_USD_SYMBOL: {
-        "no_trade_windows": [
-            (time(22, 30), time(23, 59, 59, 999)),  # Late NY session
-            (time(0, 0), time(5, 30)),    # Early Asia until London morning
-        ]
-    },
-    BTC_USD_SYMBOL: {
-        "no_trade_windows": [
-            (time(12, 30), time(16, 30)),
-        ]
-    }
-}
-
-# ---------- STATE TRACKING ----------
-state = {}  # weekend & no_trade_time flags per symbol
-
-
 # ---------- FILTERS ----------
 
 def get_now_ist():
     ts = time_module.time()
     dt_utc = datetime.fromtimestamp(ts, timezone.utc)
     return dt_utc.astimezone(IST)
-
-
-def is_weekend_ist_trading_disabled(symbol):
-    if symbol in WEEKEND_TRADING_ALLOWED_SYMBOLS:
-        return False
-
-    now_ist = get_now_ist()
-    return now_ist.weekday() in (5, 6)
-
-
-def is_no_trade_time(symbol):
-    cfg = TIME_OFF_IST.get(symbol)
-    if not cfg:
-        return False
-    now_ist = get_now_ist().time()
-    return any(start <= now_ist <= end for start, end in cfg["no_trade_windows"])
-
-
-def should_trade(symbol):
-    if symbol not in state:
-        state[symbol] = {"weekend": None, "no_trade_time": None}
-
-    weekend_now = is_weekend_ist_trading_disabled(symbol)
-    if weekend_now != state[symbol]["weekend"]:
-        state[symbol]["weekend"] = weekend_now
-        if weekend_now:
-            print(f"📅 [{symbol}] Entered weekend — skipping trades.")
-        else:
-            print(f"📅 [{symbol}] Exited weekend — trading allowed.")
-
-    no_trade_now = is_no_trade_time(symbol)
-    if no_trade_now != state[symbol]["no_trade_time"]:
-        state[symbol]["no_trade_time"] = no_trade_now
-        if no_trade_now:
-            print(f"⏳ [{symbol}] Entered no-trade hours.")
-        else:
-            print(f"⏳ [{symbol}] Exited no-trade hours.")
-
-    return not (weekend_now or no_trade_now)
-
 
 # ----------------- Utility Functions -----------------
 
@@ -207,10 +147,6 @@ class TradingViewWS:
 
     def handle_data(self, data):
         global current_candle, current_interval
-
-
-        if not should_trade(self.symbol):
-            return
 
         if data.get("m") != "qsd":
             return
