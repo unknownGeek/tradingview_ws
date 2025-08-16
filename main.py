@@ -2,9 +2,14 @@
 """
 WebSocket to n8n Webhook Forwarder
 Main entry point for the application
+
+Changes:
+- Flask runs in its own daemon thread so it doesn't block reconnection loop.
+- WebSocket runs with automatic reconnect (exponential backoff + jitter).
+- Logging to stdout (Render-friendly).
+- Graceful shutdown on KeyboardInterrupt.
 """
 
-import asyncio
 import requests
 import threading
 import sys
@@ -16,31 +21,46 @@ import time as time_module
 import plotly.graph_objs as go
 from collections import deque
 from flask import Flask, render_template_string
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import pytz
 import os
+import logging
+import signal
 
-max_candle_window_len = 12
-candle_window = deque(maxlen=max_candle_window_len)  # Store last 5/7/10 etc candles
+# -------------------- Logging Setup --------------------
+logging.basicConfig(
+    level=logging.INFO,  # adjust to DEBUG for more verbosity
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# -------------------- Globals & Config --------------------
+max_candle_window_len = 24
+candle_window = deque(maxlen=max_candle_window_len)  # Store last N candles
 current_candle = None
 current_interval = None
+
 DEFAULT_FLASK_PORT = 5000
 XAU_USD_SYMBOL = "OANDA:XAUUSD"
-BTC_USD_SYMBOL = "BINANCE:BTCUSDT"
+BTC_USD_SYMBOL = "CRYPTO:BTCUSD" # "BINANCE:BTCUSDT"
 
 app = Flask(__name__)
-
 timeframe_minute = 5
 
-tradingview_symbol = XAU_USD_SYMBOL
-# tradingview_symbol = BTC_USD_SYMBOL
+# tradingview_symbol = XAU_USD_SYMBOL
+tradingview_symbol = BTC_USD_SYMBOL
 
-
-# ---------- CONFIG ----------
 IST = pytz.timezone("Asia/Kolkata")
 
-# ---------- FILTERS ----------
+# TradingView socket url (existing)
+TV_WS_URL = "wss://data.tradingview.com/socket.io/websocket"
 
+# Control events
+_stop_event = threading.Event()
+
+
+# -------------------- Utilities --------------------
 def get_now_ist():
     ts = time_module.time()
     dt_utc = datetime.fromtimestamp(ts, timezone.utc)
@@ -72,154 +92,176 @@ def format_candle(c):
 
 
 def print_candles():
-    print(
-        f"\n--- Last {max_candle_window_len} Candles on {timeframe_minute} min timeframe---"
+    logger.info(
+        f"--- Last {max_candle_window_len} Candles on {timeframe_minute} min timeframe---"
     )
     for c in list(candle_window):
-        print(format_candle(c))
+        logger.info(format_candle(c))
     if current_candle:
-        print(format_candle(current_candle))
-    print("---------------\n")
+        logger.info(format_candle(current_candle))
 
 
-# ----------------- WebSocket Logic -----------------
-
-
+# -------------------- TradingView WebSocket Client --------------------
 class TradingViewWS:
-
-    def __init__(self, symbol=tradingview_symbol):
+    def __init__(self, symbol=tradingview_symbol, url=TV_WS_URL):
         self.symbol = symbol
         self.session = generate_session("cs")
         self.quote_session = generate_session("qs")
         self.ws = None
-        self.url = "wss://data.tradingview.com/socket.io/websocket"
+        self.url = url
         self.connected = False
 
+    # WebSocket callbacks - signatures match WebSocketApp expectations
     def on_open(self, ws):
-        print("[+] WebSocket opened")
+        logger.info("[+] WebSocket opened")
+        try:
+            # Save ws reference so send() can use it
+            self.ws = ws
 
-        # Send initial messages
-        self.send("set_auth_token", ["unauthorized_user_token"])
-        self.send("chart_create_session", [self.session, ""])
-        self.send("quote_create_session", [self.quote_session])
-        self.send("quote_set_fields", [
-            self.quote_session, "lp", "ch", "chp", "ask", "bid", "volume",
-            "open", "high", "low"
-        ])
-        self.send("quote_add_symbols", [self.quote_session, self.symbol])
-        self.send("quote_fast_symbols", [self.quote_session, self.symbol])
-        self.send("resolve_symbol", [self.session, "symbol_1", self.symbol])
-        self.send("create_series", [self.session, "s1", "symbol_1", "1", 300])
+            # Send initial messages
+            self.send("set_auth_token", ["unauthorized_user_token"])
+            self.send("chart_create_session", [self.session, ""])
+            self.send("quote_create_session", [self.quote_session])
+            self.send("quote_set_fields", [
+                self.quote_session, "lp", "ch", "chp", "ask", "bid", "volume",
+                "open", "high", "low"
+            ])
+            self.send("quote_add_symbols", [self.quote_session, self.symbol])
+            self.send("quote_fast_symbols", [self.quote_session, self.symbol])
+            self.send("resolve_symbol", [self.session, "symbol_1", self.symbol])
+            # create_series may require different args depending on TV API; keep as-is
+            self.send("create_series", [self.session, "s1", "symbol_1", "1", 300])
+
+            self.connected = True
+        except Exception:
+            logger.exception("Exception in on_open")
 
     def on_message(self, ws, message):
-        # print(f"received message: {message}\n")
+        # Trim very long logs a bit
         try:
+            display_msg = message if len(message) < 1000 else message[:1000] + "...(truncated)"
+            logger.info(f"received message: {display_msg}")
             # Respond to heartbeat messages
-            if message.startswith("~m~") and "~m~~h~" in message:
+            if isinstance(message, str) and message.startswith("~m~") and "~m~~h~" in message:
+                # detect and handle heartbeat style messages
                 if self.symbol in message:
-                    # print(f"Unrecognized heartbeat: {message}")
-                    a = 1
+                    logger.debug(f"Unrecognized heartbeat: {message}")
                 else:
-                    heartbeat_msg = message.split("~m~")[2]  # e.g., ~h~7
-                    response = f"~m~4~m~{heartbeat_msg}"
-                    ws.send(message)
-                    # print(f"[♥] Heartbeat responded with: {message}\n")
-                    return
+                    # attempt to reply with the same as previous logic
+                    try:
+                        heartbeat_msg = message.split("~m~")[2]  # e.g., ~h~7
+                        ws.send(message)  # echo back whole message (old behavior)
+                        logger.info(f"[♥] Heartbeat responded with same received message as: {display_msg}")
+                        return
+                    except Exception:
+                        logger.debug("Failed to respond to heartbeat with full echo")
 
-            while message.startswith("~m~"):
-                # Handle multiple ~m~ wrapped messages
+            # Process multiple ~m~ chunks (existing logic)
+            while isinstance(message, str) and message.startswith("~m~"):
                 message = message[3:]
                 len_str, _, message = message.partition("~m~")
-                length = int(len_str)
+                try:
+                    length = int(len_str)
+                except Exception:
+                    logger.debug("Length parse error while handling ~m~ wrapper")
+                    break
                 chunk = message[:length]
                 message = message[length:]
 
                 if chunk.startswith("~h~"):
                     # Heartbeat response
-                    ws.send(f"~m~{len(chunk)}~m~{chunk}")
-                    # print(f"[♥] Heartbeat responded with: {chunk}")
+                    try:
+                        ws.send(f"~m~{len(chunk)}~m~{chunk}")
+                        logger.info(f"[♥] Heartbeat responded with: {chunk}")
+                    except Exception:
+                        logger.debug("Failed to send heartbeat response")
                     continue
 
-                data = json.loads(chunk)
-                self.handle_data(data)
-        except Exception as e:
-            print("[!] Error parsing message:", e)
+                try:
+                    data = json.loads(chunk)
+                    self.handle_data(data)
+                except Exception:
+                    logger.debug("Failed to json-decode chunk; ignoring")
+        except Exception:
+            logger.exception("Unhandled exception in on_message")
 
     def handle_data(self, data):
         global current_candle, current_interval
 
-        if data.get("m") != "qsd":
-            return
+        try:
+            if data.get("m") != "qsd":
+                return
 
-        payload = data.get("p", [])[1]
-        if not payload or payload.get("n") != self.symbol:
-            return
+            payload = data.get("p", [])[1]
+            if not payload or payload.get("n") != self.symbol:
+                return
 
-        values = payload.get("v", {})
-        price = values.get("lp")
-        volume = values.get("volume", 0)
+            values = payload.get("v", {})
+            price = values.get("lp")
+            volume = values.get("volume", 0)
 
-        if price is None:
-            # print(f"price is None in {data}")
-            return
+            if price is None:
+                logger.debug(f"price is None in {data}")
+                return
 
-        # Use current time as fallback if timestamp not available
-        timestamp = time_module.time()
+            # Use current time as fallback if timestamp not available
+            timestamp = time_module.time()
+            interval = get_chart_timeframe_interval(timestamp)
 
-        interval = get_chart_timeframe_interval(timestamp)
+            if current_interval is None or interval != current_interval:
+                if current_candle:
+                    candle_window.append(current_candle)
+                current_candle = {
+                    'timestamp': interval,
+                    'open': price,
+                    'high': price,
+                    'low': price,
+                    'close': price,
+                    'volume': volume if volume else 0.0
+                }
+                current_interval = interval
+            else:
+                current_candle['high'] = max(current_candle['high'], price)
+                current_candle['low'] = min(current_candle['low'], price)
+                current_candle['close'] = price
+                if volume:
+                    current_candle['volume'] = volume  # Replace with latest volume
 
-        if current_interval is None or interval != current_interval:
-            if current_candle:
-                candle_window.append(current_candle)
-            current_candle = {
-                'timestamp': interval,
-                'open': price,
-                'high': price,
-                'low': price,
-                'close': price,
-                'volume': volume if volume else 0.0
-            }
-            current_interval = interval
-        else:
-            current_candle['high'] = max(current_candle['high'], price)
-            current_candle['low'] = min(current_candle['low'], price)
-            current_candle['close'] = price
-            if volume:
-                current_candle['volume'] = volume  # Replace with latest volume
-
-        # print_candles()
+            # print_candles()
+        except Exception:
+            logger.exception("Error in handle_data")
 
     def on_error(self, ws, error):
-        print("[!] WebSocket error:", error)
+        logger.error(f"[!] WebSocket error: {error}", exc_info=True)
+        self.connected = False
 
     def on_close(self, ws, close_status_code, close_msg):
-        print("[x] WebSocket closed:", close_status_code, close_msg)
+        logger.warning(f"[x] WebSocket closed: {close_status_code} {close_msg}")
+        self.connected = False
 
     def send(self, func, params):
-        msg = construct_message(func, params)
-        final_msg = "~m~{}~m~{}".format(len(msg), msg)
-        self.ws.send(final_msg)
+        try:
+            msg = construct_message(func, params)
+            final_msg = "~m~{}~m~{}".format(len(msg), msg)
+            if self.ws:
+                self.ws.send(final_msg)
+            else:
+                logger.debug("ws not set yet; can't send")
+        except Exception:
+            logger.exception("Error sending message")
 
-    def run(self):
-        self.ws = websocket.WebSocketApp(self.url,
-                                         on_open=self.on_open,
-                                         on_message=self.on_message,
-                                         on_error=self.on_error,
-                                         on_close=self.on_close)
-        self.ws.run_forever()
+    # Don't use run() here; we'll manage WebSocketApp lifecycle externally for reconnects.
 
 
-# HTTP endpoint to return current candles
+# -------------------- Flask Endpoints --------------------
 @app.route('/ping', methods=['GET'])
 def ping():
     return {"status": "OK"}
 
 
-# HTTP endpoint to return current candles
 @app.route('/', methods=['GET'])
 def homepage():
     now_ist = get_now_ist().strftime("%Y-%m-%d %H:%M:%S")
-
     routes = []
     for rule in app.url_map.iter_rules():
         if rule.endpoint != "static":
@@ -288,18 +330,18 @@ def homepage():
 # HTTP endpoint to return current candles
 @app.route('/candles', methods=['GET'])
 def get_candle_window():
-    # print("[+] Received request for candles")
-    # print(f"candle_window = {candle_window}")
+    logger.info("[+] Received request for candles")
+    logger.debug(f"candle_window = {candle_window}")
     candles = []
     if candle_window:
         candles = list(candle_window)
 
-    # print(f"candles = {candles}")
+    logger.debug(f"candles before current: {candles}")
 
     if current_candle:
         candles.append(current_candle)
 
-    # print(f"candles = {candles}")
+    logger.debug(f"candles with current: {candles}")
 
     # Convert timestamps to IST
     for c in candles:
@@ -307,10 +349,10 @@ def get_candle_window():
         dt_ist = dt_utc.astimezone(IST)
         c['timestamp_ist'] = dt_ist.strftime("%Y-%m-%dT%H:%M:%S")
 
-    if candles != []:
+    if candles:
         candles = list(reversed(candles))
 
-    # print(f"Current candles(reversed): {candles}")
+    logger.info(f"Current candles(reversed): {candles}")
     return {
         'meta': {
             'symbol': tradingview_symbol,
@@ -320,21 +362,7 @@ def get_candle_window():
     }
 
 
-async def main():
-
-    while True:
-        try:
-            tv = TradingViewWS()
-            threading.Thread(target=tv.run, daemon=True).start()
-
-            # Start Flask server
-            port = int(os.environ.get("PORT", DEFAULT_FLASK_PORT))
-            app.run(host="0.0.0.0", port=port)
-        except Exception as e:
-            print(f"[!] Exception occurred: {e}. Reconnecting in 2 seconds...")
-            time_module.sleep(2)
-
-
+# -------------------- Plotly HTML builder (unchanged) --------------------
 def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {timeframe_minute} min"):
     candles_sorted = sorted(candles, key=lambda x: x['timestamp'])
     opens = [c['open'] for c in candles_sorted]
@@ -344,20 +372,16 @@ def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {ti
 
     last_close = closes[-1] if closes else None
 
-    # Convert timestamp strings to datetime objects if needed
     times_dt = [datetime.fromisoformat(c['timestamp_ist']) if isinstance(c['timestamp_ist'], str) else c['timestamp_ist'] for c in candles_sorted]
 
-    # Add gap of 5 minutes after last candle
     if times_dt:
         last_time = times_dt[-1]
-        gap_time = last_time + timedelta(minutes = timeframe_minute*4)  # Adjust gap duration as needed
+        gap_time = last_time + timedelta(minutes=timeframe_minute * 3)
         times_dt.append(gap_time)
 
-    # Convert back to strings for Plotly (ISO format)
     times = [dt.isoformat() for dt in times_dt]
 
     fig = go.Figure()
-
     fig.add_trace(go.Candlestick(
         x=times,
         open=opens + [None],
@@ -372,26 +396,18 @@ def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {ti
         name="Price"
     ))
 
-    # Add live price line at last close price
     if last_close is not None:
-        last_x = times[-2]  # The last real candle's timestamp (before the gap)
-
+        last_x = times[-2]
         fig.add_shape(
             type="line",
             x0=last_x,
-            x1=times[-1],  # the gap timestamp or right edge
+            x1=times[-1],
             y0=last_close,
             y1=last_close,
-            line=dict(
-                color="#000000",
-                width=1,
-                dash="dot",
-            ),
+            line=dict(color="#000000", width=1, dash="dot"),
         )
-
-        # Add annotation at the end of the line
         fig.add_annotation(
-            x=times[-1],  # place annotation at the gap (right edge)
+            x=times[-1],
             y=last_close,
             text=f"{last_close:.2f}",
             showarrow=True,
@@ -413,28 +429,11 @@ def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {ti
     fig.update_layout(
         title=dict(text=title, x=0.5, font=dict(size=24, family="Inter, Arial")),
         template="plotly_white",
-        xaxis=dict(
-            showgrid=False,
-            rangeslider=dict(visible=True, thickness=0.05, bgcolor="#f5f5f5"),
-            type="date",
-            tickformat="%Y-%m-%d<br>%H:%M",
-            showspikes=True,
-            spikesnap="cursor",
-            spikemode="across",
-            spikecolor="#2196f3",
-            spikedash="solid",
-            spikethickness=1
-        ),
-        yaxis=dict(
-            side="right",
-            showspikes=True,
-            spikesnap="cursor",
-            spikemode="across",
-            spikecolor="#2196f3",
-            spikedash="solid",
-            spikethickness=1,
-            tickformat=".2f",
-        ),
+        xaxis=dict(showgrid=False, rangeslider=dict(visible=True, thickness=0.05, bgcolor="#f5f5f5"), type="date",
+                   tickformat="%Y-%m-%d<br>%H:%M", showspikes=True, spikesnap="cursor", spikemode="across",
+                   spikecolor="#2196f3", spikedash="solid", spikethickness=1),
+        yaxis=dict(side="right", showspikes=True, spikesnap="cursor", spikemode="across", spikecolor="#2196f3",
+                   spikedash="solid", spikethickness=1, tickformat=".2f"),
         hovermode="x unified",
         dragmode="pan",
         autosize=True,
@@ -445,18 +444,12 @@ def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {ti
         paper_bgcolor="white",
     )
 
-    fig.update_xaxes(
-        rangeselector=dict(
-            buttons=list([
-                dict(step="all", label="All"),
-                dict(count=15, label="15m", step="minute", stepmode="backward"),
-                dict(count=1, label="1H", step="hour", stepmode="backward"),
-                dict(count=1, label="1D", step="day", stepmode="backward"),
-            ]),
-            x=0.01,
-            y=1.05
-        )
-    )
+    fig.update_xaxes(rangeselector=dict(buttons=list([
+        dict(step="all", label="All"),
+        dict(count=15, label="15m", step="minute", stepmode="backward"),
+        dict(count=1, label="1H", step="hour", stepmode="backward"),
+        dict(count=1, label="1D", step="day", stepmode="backward"),
+    ]), x=0.01, y=1.05))
 
     config = {
         "displayModeBar": True,
@@ -468,7 +461,6 @@ def plot_candles_html(candles, title=f"📊 Jarvix - {tradingview_symbol} at {ti
 
     html = fig.to_html(full_html=True, include_plotlyjs="cdn", config=config)
 
-    # Your existing CSS + JS for OHLC info box
     style_js = """
     <style>
         #ohlc-info {
@@ -606,7 +598,6 @@ def fetch_candles_from_api(api_url):
     return resp.json()
 
 
-
 @app.route("/chart/<hostType>", methods=["GET"])
 def get_chart(hostType):
     if hostType == "remote":
@@ -616,22 +607,89 @@ def get_chart(hostType):
         candles = get_candle_window()
     c = candles['values']
     html = plot_candles_html(c)
-    # with open("candles_live.html", "w") as f:
-    #     f.write(html)
-    # print("Chart generated: candles_live.html")
-
+    logger.info("Chart generated")
     return html
 
 
+# -------------------- Run logic: Flask thread + WS reconnect loop --------------------
+def start_flask_in_thread():
+    port = int(os.environ.get("PORT", DEFAULT_FLASK_PORT))
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False),
+        daemon=True,
+        name="flask-thread"
+    )
+    flask_thread.start()
+    logger.info(f"Flask started in thread (port={port})")
+
+
+def ws_connect_loop():
+    """Persistent connect loop with exponential backoff and jitter."""
+    backoff = 1.0
+    max_backoff = 300.0  # 5 minutes
+    while not _stop_event.is_set():
+        tv = TradingViewWS()
+        ws_app = websocket.WebSocketApp(
+            tv.url,
+            on_open=tv.on_open,
+            on_message=tv.on_message,
+            on_error=tv.on_error,
+            on_close=tv.on_close
+        )
+
+        # set reference so tv.send() can use it
+        tv.ws = ws_app
+
+        try:
+            logger.info("Attempting WebSocket connection...")
+            # run_forever will block until connection closes or errors.
+            # Provide ping settings to keep connection alive.
+            ws_app.run_forever(ping_interval=30, ping_timeout=10, ping_payload="ping")
+            logger.warning("WebSocket run_forever returned (connection closed).")
+        except Exception:
+            logger.exception("Exception from run_forever")
+
+        if _stop_event.is_set():
+            logger.info("Stop event set; breaking reconnect loop.")
+            break
+
+        # Exponential backoff with jitter
+        sleep_for = backoff + random.uniform(0, min(5.0, backoff))
+        logger.warning(f"Reconnecting WebSocket in {sleep_for:.1f}s (backoff={backoff}s)...")
+        time_module.sleep(sleep_for)
+        backoff = min(backoff * 2, max_backoff)
+
+
+def _signal_handler(signum, frame):
+    logger.info(f"Signal {signum} received, shutting down...")
+    _stop_event.set()
+
+
 if __name__ == "__main__":
-    # Ensure we have the required environment
+    # Require Python 3.7+
     if sys.version_info < (3, 7):
-        print("Python 3.7 or higher is required")
+        logger.critical("Python 3.7 or higher is required")
         sys.exit(1)
 
-    # Run the async main function
+    # Setup OS signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    # Start Flask once in a daemon thread
+    start_flask_in_thread()
+
+    # Start WebSocket connect loop in main thread (so process lifecycle revolves around it)
     try:
-        asyncio.run(main())
+        ws_connect_loop()
     except KeyboardInterrupt:
-        print("\nApplication interrupted")
+        logger.info("KeyboardInterrupt received, setting stop event")
+        _stop_event.set()
+    except Exception:
+        logger.exception("Fatal exception in main")
+    finally:
+        logger.info("Shutting down - waiting briefly for threads to exit")
+        _stop_event.set()
+        # give threads a moment
+        time_module.sleep(1)
+        logger.info("Exit")
         sys.exit(0)
