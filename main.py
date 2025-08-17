@@ -44,12 +44,14 @@ current_interval = None
 DEFAULT_FLASK_PORT = 5000
 XAU_USD_SYMBOL = "OANDA:XAUUSD"
 BTC_USD_SYMBOL = "CRYPTO:BTCUSD" # "BINANCE:BTCUSDT"
+ETH_USD_SYMBOL = "CRYPTO:ETHUSD" # "BINANCE:BTCUSDT"
 
 app = Flask(__name__)
 timeframe_minute = 5
 
 # tradingview_symbol = XAU_USD_SYMBOL
-tradingview_symbol = BTC_USD_SYMBOL
+# tradingview_symbol = BTC_USD_SYMBOL
+tradingview_symbol = ETH_USD_SYMBOL
 
 IST = pytz.timezone("Asia/Kolkata")
 

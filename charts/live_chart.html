@@ -1,0 +1,140 @@
+
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Jarvix Live Candles</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+        body { font-family: Inter, Arial, sans-serif; background:#f7f9fc; margin:0; padding:20px; }
+        #container { max-width:1100px; margin: 0 auto; background:white; padding:16px; border-radius:8px; box-shadow:0 8px 20px rgba(0,0,0,0.08) }
+        h1 { margin:0 0 10px 0; font-size:20px; }
+        #meta { font-size:13px; color:#666; margin-bottom:12px; }
+        canvas { width:100% !important; height:600px !important; }
+    </style>
+
+    <!-- Chart.js core --><!-- Chart.js core -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+    <!-- Chart.js financial plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.min.js"></script>
+
+    <!-- Date adapter for time scale -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+
+
+</head>
+<body>
+<div id="container">
+    <h1>📈 Live Candles — {{ symbol }}</h1>
+    <div id="meta">Timeframe: {{ timeframe }} min | Last updated: <span id="last">-</span></div>
+    <canvas id="chart"></canvas>
+</div>
+
+<script>
+    (function(){
+      const timeframe = {{ timeframe }};
+      const symbol = "{{ symbol }}";
+      const maxPoints = 200;
+
+      // Chart.js setup
+      const ctx = document.getElementById('chart').getContext('2d');
+      const data = {
+        datasets: [{
+          label: symbol,
+          data: [] // {x: Date, o, h, l, c}
+        }]
+      };
+
+      const cfg = {
+        type: 'candlestick',
+        data: data,
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: {
+              type: 'time',
+              time: { unit: 'minute', tooltipFormat: 'yyyy-MM-dd HH:mm' },
+              ticks: { source: 'data' }
+            },
+            y: { position: 'right' }
+          },
+          animation: false,
+        }
+      };
+
+      const chart = new Chart(ctx, cfg);
+
+      // Maintain map of ts -> index for easy update
+      const idxByTs = new Map();
+        function upsertCandle(c) {
+          const x = new Date(c.ts);
+          const point = {x, o: c.open, h: c.high, l: c.low, c: c.close};
+
+          if (idxByTs.has(c.ts)) {
+            const idx = idxByTs.get(c.ts);
+            chart.data.datasets[0].data[idx] = point;
+          } else {
+            chart.data.datasets[0].data.push(point);
+            idxByTs.set(c.ts, chart.data.datasets[0].data.length - 1);
+
+            if (chart.data.datasets[0].data.length > maxPoints) {
+              chart.data.datasets[0].data.splice(0, 1);
+              idxByTs.clear();
+              chart.data.datasets[0].data.forEach((d, i) =>
+                idxByTs.set(d.x.getTime(), i)
+              );
+            }
+          }
+          chart.update();
+          document.getElementById('last').textContent = new Date().toLocaleString();
+        }
+
+      // SSE connect
+      const evt = new EventSource('/events');
+      evt.onopen = () => console.log('SSE open');
+      evt.onerror = (e) => console.warn('SSE error', e);
+
+      evt.onmessage = function(e) {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'candle_update' || msg.type === 'candle_final') {
+            upsertCandle(msg.candle);
+          } else if (msg.type === 'candles_snapshot') {
+            // initial snapshot array
+            chart.data.datasets[0].data = msg.candles.map(c => ({x: new Date(c.ts), o:c.open, h:c.high, l:c.low, c:c.close}));
+            // rebuild index
+            idxByTs.clear();
+            chart.data.datasets[0].data.forEach((d, i) => idxByTs.set(d.x.getTime(), i));
+            chart.update();
+          } else if (msg.type === 'ticker') {
+            // optionally handle last price updates
+          }
+        } catch (err) {
+          console.error('failed to parse SSE message', err);
+        }
+      };
+
+      // On load, fetch snapshot to populate historical candles quickly
+      fetch('/prices')
+        .then(r => r.json())
+        .then(arr => {
+          if (Array.isArray(arr) && arr.length) {
+            arr.forEach(c => {
+              const point = {x: new Date(c.ts), o:c.open, h:c.high, l:c.low, c:c.close};
+              chart.data.datasets[0].data.push(point);
+            });
+            chart.data.datasets[0].data.sort((a,b) => a.t - b.t);
+            idxByTs.clear();
+            chart.data.datasets[0].data.forEach((d, i) => idxByTs.set(d.x.getTime(), i));
+            chart.update();
+          }
+        })
+        .catch(err => console.warn('failed to load /prices snapshot', err));
+    })();
+</script>
+</body>
+</html>
