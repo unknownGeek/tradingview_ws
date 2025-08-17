@@ -168,7 +168,7 @@ class TradingViewWS:
                 try:
                     heartbeat_msg = message.split("~m~")[2]  # e.g., ~h~7
                     ws.send(message)
-                    logger.info(f"[♥] Heartbeat responded with: {heartbeat_msg}")
+                    logger.info(f"[♥] Heartbeat responded with: {display}")
                     return
                 except Exception:
                     logger.debug("failed to handle heartbeat echo")
