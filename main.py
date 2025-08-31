@@ -47,17 +47,21 @@ BTC_USD_SYMBOL = "CRYPTO:BTCUSD" # "BINANCE:BTCUSDT"
 ETH_USD_SYMBOL = "CRYPTO:ETHUSD" # "BINANCE:BTCUSDT"
 
 app = Flask(__name__)
-timeframe_minute = 5
+DEFAULT_TIMEFRAME_MINUTE = "5"
+DEFAULT_TV_WS_URL = "wss://data.tradingview.com/socket.io/websocket"
 
 
-tradingview_symbol = os.environ.get("SYMBOL", ETH_USD_SYMBOL)
+tradingview_symbol = os.environ.get("SYMBOL", BTC_USD_SYMBOL)
+timeframe_minute = int(os.environ.get("TIMEFRAME_MINUTE", DEFAULT_TIMEFRAME_MINUTE))
+
+# TradingView socket url
+TV_WS_URL = os.environ.get("TV_WS_URL", DEFAULT_TV_WS_URL)
+
 # tradingview_symbol = BTC_USD_SYMBOL
 # tradingview_symbol = ETH_USD_SYMBOL
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# TradingView socket url (existing)
-TV_WS_URL = "wss://data.tradingview.com/socket.io/websocket"
 
 # Control events
 _stop_event = threading.Event()
