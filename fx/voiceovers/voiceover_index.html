@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+    <meta charset="UTF-8">
+    <title>Natural Hindi Love Story TTS</title>
+</head>
+<body>
+<h1>क्लिक करें और हिंदी लव स्टोरी सुनें</h1>
+<button onclick="playStory()">Play Story</button>
+
+<script>
+    function speakLine(text, options = {}) {
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = "hi-IN";
+        utterance.rate = options.rate || 1.0;
+        utterance.pitch = options.pitch || 1.0;
+        utterance.volume = options.volume || 1.0;
+        window.speechSynthesis.speak(utterance);
+    }
+
+    function playStory() {
+        const story = [
+            { text: "बारिश की पहली बूँदों में भीगती सड़क पर वह लड़की खड़ी थी।", emotion: "sad" },
+            { text: "आरव, जो कैफ़े में बैठा था, बाहर आया।", emotion: "surprise" },
+            { text: "उसने पहली नजर में उसे देख लिया।", emotion: "happy" },
+            { text: "उसकी मुस्कान में कुछ ऐसा था जो आरव के दिल को छू गया।", emotion: "happy" },
+            { text: "आरव ने धीरे-धीरे उसके हाथों से किताबें संभाली।", emotion: "shy" },
+            { text: "बाहर बारिश हो रही थी।", emotion: "neutral" },
+            { text: "अंदर कैफ़े की गर्मी उनके बीच की दूरी को कम कर रही थी।", emotion: "neutral" },
+            { text: "मुझे डर है कि ये सब सिर्फ एक सपने जैसा है।", emotion: "sad" },
+            { text: "लेकिन सपने भी सच हो सकते हैं, जब हम साथ हों।", emotion: "happy" },
+            { text: "समाप्त होते हुए कहानी का संदेश यह था कि प्यार छोटे-छोटे पलों, एक मुस्कान और थोड़ी बारिश की आहट से जन्म लेता है।", emotion: "neutral" }
+        ];
+
+        const emotionMap = {
+            sad:      { rate: 0.88 + Math.random()*0.07, pitch: 0.65 + Math.random()*0.1, volume: 0.85 },
+            happy:    { rate: 1.25 + Math.random()*0.1, pitch: 1.3 + Math.random()*0.15, volume: 1.0 },
+            surprise: { rate: 1.2 + Math.random()*0.05, pitch: 1.45 + Math.random()*0.05, volume: 1.0 },
+            shy:      { rate: 0.95 + Math.random()*0.05, pitch: 1.05 + Math.random()*0.05, volume: 0.9 },
+            neutral:  { rate: 1.0, pitch: 1.0, volume: 1.0 }
+        };
+
+        let delay = 0;
+        story.forEach(line => {
+            setTimeout(() => {
+                speakLine(line.text, emotionMap[line.emotion]);
+            }, delay);
+
+            // Delay based on text length with slight randomness for natural pauses
+            delay += line.text.length * 85 + Math.random()*300;
+        });
+    }
+</script>
+</body>
+</html>
